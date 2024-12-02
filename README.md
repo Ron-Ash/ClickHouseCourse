@@ -113,3 +113,24 @@ It's logical to assume that partitioning (logical combination of records in a ta
 Partitions can improved the performance of mutations, moving data around, retention policies, adn so on. In general, to improve performance focu on defining a good primary key.
 
 In most cases, partition key is not required; and in most other cases, a partition key more granular than by month is not required.
+
+## Inserting Data
+
+![alt text](image-24.png)
+sometimes ClickHouse can infer the column names and data types (schema might not have to be defined explicitly). And sometimes ClickHouse can also figure out the format of the datafile (from the filename extension); and its compression (from its extension)
+
+ClickHouse supports over 75 data formats (TSV, CSV, ..., 20+ formats for JSON data, ..., Protobuf, Parquet, Arrow, ...)
+
+**_Table Engine_** has to be used for Provider-Subscriber platforms like Kafka (uses ClickPipes if using ClickHouse Cloud)
+![alt text](image-25.png)
+
+### Table Functions vs Table Engines
+
+![alt text](image-26.png)
+table engines in general store all the connection details, teh type of file, the schema, the credentials, etc. These are not required to be entered everytime they are accessed (like a proxy) instead the files stay on the 3rd party server but can be queried as if on the ClickHouse server (when queried streams data to ClickHouse server).
+| | |
+|-|-|
+|![alt text](image-27.png)|![alt text](image-28.png)|
+
+PostgreSQL and MySQL have special **_database engines_** as well:
+![alt text](image-29.png)
