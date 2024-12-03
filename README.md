@@ -10,7 +10,7 @@ Note that ANSI SQL data types all have appropriate aliases
 
 Running on own machine: (using Docker)
 
-- `docker run -d --name some-clickhouse-server --ulimit nofile=262144:262144 clickhouse/clickhouse-serve` starts the ClickHouse server
+- `docker run -d --name some-clickhouse-server --ulimit nofile=262144:262144 clickhouse` starts the ClickHouse server
 - `docker exec -it some-clickhouse-server clickhouse-client` enters the user to the built-in ClickHouse client CLI
 
 ## Architecture
@@ -134,3 +134,70 @@ table engines in general store all the connection details, teh type of file, the
 
 PostgreSQL and MySQL have special **_database engines_** as well:
 ![alt text](image-29.png)
+
+## Materialized Views
+
+The concept of views in ClickHouse is similar to views in other DBMSs; with the contents of a view table being based on teh results of a `SELECT` query.
+![alt text](image-30.png)
+
+### Parameterized Views
+
+ClickHouse additionally facilitates **_Parameterized Views_**, allowing for the view definition to change based on some parameters that can be fed at query execution time.
+
+```sql
+CREATE VIEW raw_data_parametrized AS
+SELECT *
+FROM raw_data
+WHERE (id >= {id_from:UInt32}) AND (id <= {id_to:UInt32});
+```
+
+```sql
+clickhouse-cloud :) SELECT count() FROM raw_data_parametrized(id_from=0, id_to=50000);
+
+SELECT count()
+FROM raw_data_parametrized(id_from = 0, id_to = 50000)
+
+Query id: 5731aae1-3e68-4e63-b57f-d50f29055744
+
+┌─count()─┐
+│ 317019  │
+└─────────┘
+
+1 row in set. Elapsed: 0.004 sec. Processed 319.49 thousand rows, 319.49 KB (76.29 million rows/s., 76.29 MB/s.)
+```
+
+Materialized Views in ClickHouse are `INSERT` triggers that **store** the result of a query inside anothe rdestination table. This means that when an `INSERT` happens to the source table of the `SELECT` query, the query is executed on newly-inserted rows and the result is inserted into the MV table (No trigger on `DELETE`, `UPDATE`,etc.).
+![alt text](image-31.png)
+Note that ClickHouse creates a hidden table in addition to the materialized view for each MV, called `.inner.{uuid}` (has to do with how MVs work in ClickHouse). Instead of having ClickHouse implicitly create `.inner.{uuid}` as the hidden table; one can define an explicit table for a view, and then define a materialized view that sends its data **_"to"_** the explicit table (seperate the view from its underlying table):
+
+1. Define the **_destination table_**
+
+   ```sql
+   CREATE TABLE uk_price_by_town_dest (
+     price UInt32,
+     date  Date,
+     streat  LowCardinality(String),
+     town  LowCardinality(String),
+     district  LowCardinality(String)
+   )
+   ENGINE = MergeTree
+   ORDER BY town;
+   ```
+
+2. Define the MV using the `TO` clause "to: the destination table
+
+   ```sql
+   CREATE MATERIALIZED VIEW uk_price_by_town_view TO uk_price_by_town_dest AS (
+     SELECT price, date, street, town, district FROM uk_price_paid
+     WHERE date >= toDate('2024-02-19 12:30:00')
+   );
+
+   ```
+
+3. **_Populate the destination_** table with historic data
+
+   ```sql
+   INSERT INTO uk_price_by_town_dest
+     SELECT price, date, street, town, district FROM uk_price_paid
+     WHERE date < toDate('2024-02-19 12:30:00')
+   ```
