@@ -114,6 +114,34 @@ Partitions can improved the performance of mutations, moving data around, retent
 
 In most cases, partition key is not required; and in most other cases, a partition key more granular than by month is not required.
 
+```sql
+-- creates a view that will calculate the data used when (un)compressed by the tables defined:
+CREATE VIEW memory_usage_per_tables AS (
+  SELECT
+    table,
+    formatReadableSize(sum(data_compressed_bytes)) AS compressed_size,
+    formatReadableSize(sum(data_uncompressed_bytes)) AS uncompressed_size,
+    count() AS num_of_active_parts
+  FROM system.parts
+  WHERE (active = 1) AND (table IN {table_names:Array(String)})
+  GROUP BY table
+);
+```
+
+```sql
+SELECT *
+FROM memory_usage_per_tables(table_names = ['uk_prices', 'generation'])
+
+Query id: 678c9ce2-25b1-4467-911a-68a53a681055
+
+   ┌─table──────┬─compressed_size─┬─uncompressed_size─┬─num_of_active_parts─┐
+1. │ uk_prices  │ 876.59 KiB      │ 19.56 MiB         │                   1 │
+2. │ generation │ 2.00 GiB        │ 10.79 GiB         │                   7 │
+   └────────────┴─────────────────┴───────────────────┴─────────────────────┘
+
+2 rows in set. Elapsed: 0.004 sec.
+```
+
 ## Inserting Data
 
 ![alt text](image-24.png)
@@ -135,7 +163,7 @@ table engines in general store all the connection details, teh type of file, the
 PostgreSQL and MySQL have special **_database engines_** as well:
 ![alt text](image-29.png)
 
-## Materialized Views
+## Views
 
 The concept of views in ClickHouse is similar to views in other DBMSs; with the contents of a view table being based on teh results of a `SELECT` query.
 ![alt text](image-30.png)
@@ -166,7 +194,9 @@ Query id: 5731aae1-3e68-4e63-b57f-d50f29055744
 1 row in set. Elapsed: 0.004 sec. Processed 319.49 thousand rows, 319.49 KB (76.29 million rows/s., 76.29 MB/s.)
 ```
 
-Materialized Views in ClickHouse are `INSERT` triggers that **store** the result of a query inside anothe rdestination table. This means that when an `INSERT` happens to the source table of the `SELECT` query, the query is executed on newly-inserted rows and the result is inserted into the MV table (No trigger on `DELETE`, `UPDATE`,etc.).
+### Materialized Views
+
+**_Materialized Views_** in ClickHouse are `INSERT` triggers that **store** the result of a query inside anothe rdestination table. This means that when an `INSERT` happens to the source table of the `SELECT` query, the query is executed on newly-inserted rows and the result is inserted into the MV table (No trigger on `DELETE`, `UPDATE`,etc.).
 ![alt text](image-31.png)
 Note that ClickHouse creates a hidden table in addition to the materialized view for each MV, called `.inner.{uuid}` (has to do with how MVs work in ClickHouse). Instead of having ClickHouse implicitly create `.inner.{uuid}` as the hidden table; one can define an explicit table for a view, and then define a materialized view that sends its data **_"to"_** the explicit table (seperate the view from its underlying table):
 
@@ -189,7 +219,7 @@ Note that ClickHouse creates a hidden table in addition to the materialized view
    ```sql
    CREATE MATERIALIZED VIEW uk_price_by_town_view TO uk_price_by_town_dest AS (
      SELECT price, date, street, town, district FROM uk_price_paid
-     WHERE date >= toDate('2024-02-19 12:30:00')
+     WHERE date >= toDate('2024-02-19 12:30:00') -- pick a time in the "not too distant" future
    );
 
    ```
@@ -201,3 +231,306 @@ Note that ClickHouse creates a hidden table in addition to the materialized view
      SELECT price, date, street, town, district FROM uk_price_paid
      WHERE date < toDate('2024-02-19 12:30:00')
    ```
+
+### Aggregations in MVs
+
+Materialized Views on their own cannot handle running average calculations:
+
+<table>
+<tr>
+<td>
+
+```sql
+CREATE TABLE some_numbers
+(
+    `id` UInt32,
+    `x` UInt32
+)
+ENGINE = MergeTree
+PRIMARY KEY id
+
+Query id: f9a828cc-52e6-493a-b4b5-222872bac207
+
+Ok.
+```
+
+</td>
+<td>
+
+```sql
+CREATE TABLE agg_of_some_numbers
+(
+    `id` UInt32,
+    `max_id` UInt32,
+    `avg_id` UInt32
+)
+ENGINE = MergeTree
+PRIMARY KEY id
+
+Query id: 61284097-f0b0-476c-bb78-cb7d01efc183
+
+Ok.
+```
+
+</td>
+<td>
+
+```sql
+CREATE MATERIALIZED VIEW view_of_agg_of_some_numbers TO agg_of_some_numbers
+AS SELECT
+    id,
+    max(x) AS max_id,
+    avg(x) AS avg_id
+FROM some_numbers
+GROUP BY id
+
+Query id: 4c542be8-c5e9-4749-aff3-2fc5e157e5d7
+
+Ok.
+```
+
+</td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td>
+
+```sql
+INSERT INTO some_numbers FORMAT Values -- (1,10), (1,20), (2, 300), (2,400)
+
+Query id: 97b410e8-967f-49aa-a68c-8e903f162306
+
+Ok.
+```
+
+The first insertion into the table will have the calculations work properly:
+
+</td>
+<td>
+
+```sql
+SELECT *
+FROM agg_of_some_numbers
+
+Query id: 72cdb105-024c-4c78-aef4-cb1282fa007e
+
+   ┌─id─┬─max_id─┬─avg_id─┐
+1. │  1 │     20 │     15 │
+2. │  2 │    400 │    350 │
+   └────┴────────┴────────┘
+
+2 rows in set. Elapsed: 0.004 sec.
+```
+
+</td>
+</tr>
+<tr>
+<td>
+
+```sql
+INSERT INTO some_numbers FORMAT Values -- (1,1000), (2,20)
+
+Query id: e038491f-a438-4373-b3c5-c2e612e306d8
+
+Ok.
+```
+
+Further insertions into the table will result in the calculations being performed incorrectly, treating each block as entirely different from each other; not like the running aggregations that were expected:
+
+</td>
+<td>
+
+```sql
+SELECT *
+FROM agg_of_some_numbers
+
+Query id: 20438124-e997-480e-811e-27cb8a633e12
+
+   ┌─id─┬─max_id─┬─avg_id─┐
+1. │  1 │   1000 │   1000 │
+2. │  2 │     20 │     20 │
+   └────┴────────┴────────┘
+   ┌─id─┬─max_id─┬─avg_id─┐
+3. │  1 │     20 │     15 │
+4. │  2 │    400 │    350 │
+   └────┴────────┴────────┘
+
+4 rows in set. Elapsed: 0.006 sec.
+```
+
+</td>
+</tr>
+
+</table>
+
+The special _engine_, **_AggregatingMergeTree_**, is designed specifically for dealing with (running) aggregations. This is useful when repetitively running aggregation queries in ClickHouse on (relatively) slowly changing data; instead of calculating them every time from scratch, a running aggregations can be used.
+
+_AggregatingMergeTree_ collapses rows with the **same primary key (sort order)** into a single record, with the set of values of the combined rows aggregated. The columns keep track of the **"state"** of each set of values, with supported column types;
+**_AggregateFunction(T,U)_**, and **_SimpleAggregateFunction(T,U)_**
+
+- **_T_** : **aggregation function** to be used by the column
+- **_U_** : **data type** to be used by the column
+
+<table>
+<tr>
+<td>
+
+```sql
+CREATE TABLE amt_of_some_numbers
+(
+    `id` UInt32,
+    `max_column` SimpleAggregateFunction(max, UInt32),
+    `avg_column` AggregateFunction(avg, UInt32)
+)
+ENGINE = AggregatingMergeTree
+PRIMARY KEY id
+
+Query id: c79beea8-ccaa-4668-b4bd-9781f6001ac8
+
+Ok.
+```
+
+</td>
+<td>
+
+```sql
+CREATE MATERIALIZED VIEW view_of_amt_of_some_numbers TO amt_of_some_numbers
+AS SELECT
+    id,
+    maxSimpleState(x) AS max_column,
+    avgState(x) AS avg_column
+FROM some_numbers
+GROUP BY id
+
+Query id: 6cef55f6-e7ef-46de-aefc-1a7774d7cf43
+
+Ok.
+```
+
+**Must use** the `(Simple)State` combinator/suffix functions corresponding to the variable's `(Simple)AggregateFunction` data types.
+
+</td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td>
+
+```sql
+INSERT INTO some_numbers FORMAT Values -- (1,10), (1,20), (2, 300), (2,400)
+
+Query id: c111aac6-a3f3-4438-bf5c-a5e6146a02b4
+
+Ok.
+```
+
+```sql
+INSERT INTO some_numbers FORMAT Values -- (1,1000), (2,20)
+
+Query id: c1b6addb-52cb-4b67-bfa2-dd11c717a7d7
+
+Ok.
+```
+
+Some interesting results occur now when this is used: **1)** the _parts_ have not merged yet, and **2)** the avg_column is storing binary data.
+
+</td>
+<td>
+
+```sql
+SELECT *
+FROM amt_of_some_numbers
+
+Query id: 1ce49fad-f265-4b44-8052-926d453e6748
+
+   ┌─id─┬─max_column─┬─avg_column─┐
+1. │  1 │       1000 │ �♥☺           │
+2. │  2 │         20 │ ¶☺           │
+   └────┴────────────┴────────────┘
+   ┌─id─┬─max_column─┬─avg_column─┐
+3. │  1 │         20 │ ▲☻           │
+4. │  2 │        400 │ �☻☻           │
+   └────┴────────────┴────────────┘
+
+4 rows in set. Elapsed: 0.009 sec.
+```
+
+</td>
+</tr>
+</table>
+
+Note that if `INSERT` is done via `SELECT` query, type coercion must be done using the `(Simple)State` combinator/suffix functions:
+
+```sql
+INSERT INTO some_numbers
+  SELECT
+    id,
+    maxSimpleState(x) as max_column,
+    avgState(x) as avg_column
+  FROM numbers
+  GROUP BY id
+```
+
+These unusual results are due to ClickHouse storing an intermediate state as opposed to the final result (not be able to calculate moving aggregates from final value). Therefore, one must query the table using the appropriate aggregation functions with a `Merge` combinator/suffix (for `AggregateFunction` types):
+
+```sql
+SELECT
+    id,
+    max(max_column),
+    avgMerge(avg_column)
+FROM amt_of_some_numbers
+GROUP BY id
+
+Query id: 1b0e7fea-f040-417e-80b9-02e87b89b094
+
+   ┌─id─┬─max(max_column)─┬─avgMerge(avg_column)─┐
+1. │  2 │             400 │                  240 │
+2. │  1 │            1000 │    343.3333333333333 │
+   └────┴─────────────────┴──────────────────────┘
+
+2 rows in set. Elapsed: 0.012 sec.
+```
+
+#### SummingMergeTree
+
+The _engine_ **_SummingMergeTree_**, similarly to _AggreationgMergeTree_, collapses rows with the **same primary key (sort order)** into a single record. But differs from _AggreationgMergeTree_ by **only summarizing the columns**, maintaining the original numeric data type.
+
+Due to this, there is no need to use the `(Simple)State` combinator/suffix functions or the `(Simple)AggregateFunction` data types:
+
+<table>
+<tr>
+<td>
+
+```sql
+CREATE TABLE prices_sum_dest
+(
+    `town` LowCardinality(String),
+    `price` UInt32
+)
+ENGINE = SummingMergeTree
+ORDER BY town
+```
+
+Note that there might be **multiple rows with the same primary key** that should be aggregated, hence should always use the `sum` and the `GROUP BY` query.
+
+</td>
+<td>
+
+```sql
+CREATE MATERIALIZED VIEW price_sum_view TO prices_sum_dest
+(
+    `town` String,
+    `price` UInt32
+)
+AS SELECT
+    town,
+    price
+FROM uk_price_paid
+```
+
+</td>
+</tr>
+</table>
