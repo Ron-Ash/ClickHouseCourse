@@ -1,0 +1,45 @@
+version: "3.8"
+
+name: app
+
+services:
+  chnode1:
+    image: chnode1
+    hostname: chnode1
+    networks:
+      - distributed_clickhouse_network
+    volumes:
+      - chhost1_data:/var/lib/clickhouse
+      - chhost1_logs:/var/log/clickhouse
+
+  chnode2:
+    image: chnode2
+    hostname: chnode2
+    networks:
+      - distributed_clickhouse_network
+    volumes:
+      - chhost2_data:/var/lib/clickhouse
+      - chhost2_logs:/var/log/clickhouse
+
+  chnode3:
+    image: chnode3
+    hostname: chnode3
+    networks:
+      - distributed_clickhouse_network
+    volumes:
+      - chhost3_data:/var/lib/clickhouse
+      - chhost3_logs:/var/log/clickhouse
+
+networks:
+  distributed_clickhouse_network:
+    driver: bridge
+
+volumes:
+  chhost1_data:
+  chhost1_logs:
+
+  chhost2_data:
+  chhost2_logs:
+
+  chhost3_data:
+  chhost3_logs:

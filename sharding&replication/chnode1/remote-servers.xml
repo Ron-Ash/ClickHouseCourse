@@ -1,0 +1,21 @@
+<clickhouse>
+  <remote_servers replace="true">
+    <cluster_2S_1R>
+    <secret>mysecretphrase</secret>
+        <shard>
+            <internal_replication>true</internal_replication>
+            <replica>
+                <host>chnode1</host>
+                <port>9000</port>
+            </replica>
+        </shard>
+        <shard>
+            <internal_replication>true</internal_replication>
+            <replica>
+                <host>chnode2</host>
+                <port>9000</port>
+            </replica>
+        </shard>
+    </cluster_2S_1R>
+  </remote_servers>
+</clickhouse>

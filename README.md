@@ -534,3 +534,150 @@ FROM uk_price_paid
 </td>
 </tr>
 </table>
+
+## Sharding and Replication
+
+**_Sharding_** provides scalability; splitting a database into multiple smaller tables, called _shards_, (a table has one _shard_ by default) stored on **different servers**. Do not _shard_ a table unless it is really neccessary (a lot of data can fit in a single _shard_), instead attempt to increase the machine's capacity (Disk space, RAM, Cores, etc.). **_Replication_** provides redundancy, with each _shard_ consisting of >=1 _replicas_ (containing the same data per _shard_), placed on **different servers**, so if one serveer fails, the data is still available. Each _MergeTree_ _engine_ has a "replicated" version, **_ReplicatedMergeTree_** (or _SharedMergeTree_ if in the cloud).
+![alt text](image-32.png)
+Replication also requires **_ClickHouse Keeper_** (centralized service for reliable distributed coordination similar to **_Apache ZooKeeper_**) which tracks the state of each _replicas_ to keep them in sync, typically run on a seperate machine (can also be executed within `clickhouse-server` processes).
+
+**_Server Hosts_** (_server_) are the hardware (cloud/on-premises) that makes up the machines (more CPU cores improves data ingestion speeds, faster disks improve query performance, more memory improves data with high cardinality - where more sorting is needed); whereas **_Database Hosts_** (_host_) are the running instances of ClickHouse (multiple _hosts_ can run in a single _server_). A **_Cluster_**, not to be confused with the physical cluster of servers, is a user-defined **logical collection of >=1 shards** (which consists of _replicas_)
+![alt text](image-33.png)
+
+<table>
+<tr>
+<td>
+
+1. **configure a cluster** in `/etc/clickhouse-server/config.xml`
+
+   ```xml
+   <remote_servers>
+     <cluster1>
+       <shard>
+         <internal_replication>true</internal_replication>
+         <replica>
+           <host>host1</host>
+           <host>9000</host>
+         </replica>
+         <replica>
+           <host>host2</host>
+           <host>9000</host>
+         </replica>
+       </shard>
+       <shard>
+         <internal_replication>true</internal_replication>
+         <replica>
+           <host>host3</host>
+           <host>9000</host>
+         </replica>
+         <replica>
+           <host>host4</host>
+           <host>9000</host>
+         </replica>
+       </shard>
+     </cluster1>
+   </remote_servers>
+   ```
+
+</td>
+<td>
+
+![alt text](image-34.png)
+
+</td>
+</tr>
+<tr>
+<td>
+
+2. **configure ZooKeeper/ClickHouse Keeper** in `/etc/clickhouse-keeper/keeper_config.xml`
+
+   ```xml
+   <keeper_servers>
+      <tcp_port>2181</tcp_port>  <!-- servers talk to keeper on this port -->
+      <server_id>1</server_id> <!-- Must be unique among all keeper serves -->
+      <raft_configuration> <!-- consensus algorithm used by ClickHouse Keeper -->
+         <!-- all servers in quorum -->
+         <server>
+            <id>1</id>
+            <hostname>keeper1</hostname>
+            <port>9234</port> <!-- keeper nodes talk to each other on this port -->
+         </server>
+         <server>
+            <id>2</id>
+            <hostname>keeper2</hostname>
+            <port>9234</port>
+         </server>
+         <server>
+            <id>3</id>
+            <hostname>keeper3</hostname>
+            <port>9234</port>
+         </server>
+      </raft_configuration>
+   </keeper_servers>
+   ```
+
+</td>
+<td>
+
+3. **Tell the _hosts_ where ClickHouse Keeper is running** in `/etc/clickhouse-server/config.xml`
+
+   ```xml
+   <zookeeper>
+        <node>
+            <host>keeper1</host>
+            <port>2181</port>
+        </node>
+        <node>
+            <host>keeper2</host>
+            <port>2181</port>
+        </node>
+        <node>
+            <host>keeper3</host>
+            <port>2181</port>
+        </node>
+   </zookeeper>
+   ```
+
+</td>
+</tr>
+</table>
+
+<table><tr><td>
+
+2 _replicas_ **with the same paths** in ClickHouse Keeper will hold the same data (all names and paths are arbitrary). Therefore, instead of writting the same commands on all _hosts_, using the `ON CLUSTER` suffix, a command/query is written on all _hosts_ in the cluster automatically.
+
+![alt text](image-35.png)
+
+</td><td>
+
+![alt text](image-36.png)
+Note that the `{parameters}` must be defined in `<macros>` inside the clickhouse-server in `/etc/clickhouse-server/config.xml`
+
+</td></tr></table>
+
+While the data is then replicated across the _replicas_ (automatically), the _shards_ are disconnected from one another and so in order to access the whole database (split between _shards_), a table with a **_Distributed_** _engine_ must be created (using the schema of the distributed table). Note that this table only needs to be created on one of the _hosts_.
+
+<table><tr><td>
+
+![alt text](image-37.png)
+
+</td><td>
+
+![alt text](image-38.png)
+
+</td></tr></table>
+
+Querying this table forwards the command to one _replica_ of each _shard_, with each _replica_ processing its part of the data, sending back its results to be combined to determine the final result. Note that inserting data into the local table (not _Distributed_) will replicate automatically on all _replicas_ of the _shard_ but will not load balance the request across the _shards_ (for this must insert into _Distributed_ table)
+
+### Views of Distributed Tables
+
+There are two methods of creating a distributed MV:
+
+1. Define the MV locally on each _replica_, leading to the MVs processing locally with no added network overhead; with a _distributed_ table being defined for easy querying of the multiple view tables.
+   ![alt text](image-39.png)
+2. Define a _distributed_ MV of a _distributed_ table (can specify _sharding_ key), leading to any activity on the _distributed_ table propagating to the MV
+   ![alt text](image-40.png)
+
+### ClickHouse Cloud
+
+_ClickHouse Cloud_ uses a cloud-native replacement to _ReplicatedMergeTree_ , called **_SharedMergeTree_** (automatically convertes user-defined _engines_ to its _SharedMergeTree_ type); which works with shared storage (S3, GCS, etc.) and thereby does not require _sharding_ (every table has 1 shard), provides a greater seperation of compute and storage, and faster replication, mutation, and merges.
