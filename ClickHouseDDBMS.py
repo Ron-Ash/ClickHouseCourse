@@ -152,9 +152,9 @@ class ShardingReplicationFileSystem:
         root.append(macros)
 
         shard = gfg.SubElement(macros, 'shard')
-        shard.text = f'{shardi}'
+        shard.text = f'shard_{shardi}'
         replica = gfg.SubElement(macros, 'replica')
-        replica.text = f'{replicaj}'
+        replica.text = f'replica_{replicaj}'
 
         return root
     
@@ -286,6 +286,7 @@ if __name__ == "__main__":
     else:
         ClickHouseDDBMS(int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])).make()
 
+# https://clickhouse.com/docs/en/architecture/horizontal-scaling
 
 # CREATE DATABASE db1 ON CLUSTER cluster_{sys.argv[1]}S_{sys.argv[2]}R;
 # CREATE TABLE db1.table1 ON CLUSTER cluster_{sys.argv[1]}S_{sys.argv[2]}R
@@ -293,7 +294,7 @@ if __name__ == "__main__":
 #     `id` UInt64,
 #     `column1` String
 # )
-# ENGINE = ReplicatedMergeTree('clickhouse/tables/table1/{shard}','{replica}')
+# ENGINE = ReplicatedMergeTree('/clickhouse/tables/table1/{shard}','{replica}')
 # ORDER BY id;
 # -- in one shard:
 # INSERT INTO db1.table1 (id, column1) VALUES (1, 'abc');

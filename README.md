@@ -584,6 +584,8 @@ Replication also requires **_ClickHouse Keeper_** (centralized service for relia
 
 ![alt text](image-34.png)
 
+Each clickhouse host/instance contains a single replica of a single shard. To have a single physical host contain multiple clickhouse instances, virtualization (docker, etc.) must be used.
+
 </td>
 </tr>
 <tr>
@@ -638,6 +640,8 @@ Replication also requires **_ClickHouse Keeper_** (centralized service for relia
    </zookeeper>
    ```
 
+   ClickHouse Keeper provides the coordination system for data replication and distributed DDL queries execution (compabilbe with Apache ZooKeeper); Synchronizing all replicas and shards correctly.
+
 </td>
 </tr>
 </table>
@@ -681,3 +685,54 @@ There are two methods of creating a distributed MV:
 ### ClickHouse Cloud
 
 _ClickHouse Cloud_ uses a cloud-native replacement to _ReplicatedMergeTree_ , called **_SharedMergeTree_** (automatically convertes user-defined _engines_ to its _SharedMergeTree_ type); which works with shared storage (S3, GCS, etc.) and thereby does not require _sharding_ (every table has 1 shard), provides a greater seperation of compute and storage, and faster replication, mutation, and merges.
+
+## Data Joining
+
+https://clickhouse.com/docs/en/guides/joining-tables
+
+Clickhouse supports all SQL JOINs, teh difference comes from how ClickHouse handles the right vs left tables in the join. Joining large datasets require a lot of memory and CPU power; and so to ensure maximum utilization of resources, ClickHouse has 6 different join algorithms:
+
+![alt text](image-41.png)
+
+Default is **_direct_** but if Dictionary/Join table _engine_ are not implemented, **_hash_** is defaulted to (memory bound and so can fail)
+
+<table><tr><td>
+
+![alt text](image-42.png)
+
+</td><td>
+
+![alt text](image-43.png)
+
+</td></tr></table>
+
+```sql
+SELECT *
+FROM actor AS a
+JOIN roles AS r ON a.id = r.actor_id
+SETTINGS join_algorithm = 'hash'
+```
+
+### Hash JOINs
+
+A **_hash table_** is built **in memory** from the right-hand table; with '**_hash_**' building a single _hash table_, '**_parallel_hash_**' buckets the data and builds several _hash tables_ ('**_grace_hash_**' is similar to '_parallel_' but limits the memory usage). The data in the right-hand table is streamed (in parallel) into memory with the data in the left-hand table streamed and joined by doing lookups into the hash table.
+
+Note that the **table must fit in memory**; if not, an exception occurs and the JOIN fails (put the smaller table on the right side of the JOIN)
+
+### Sort Merge JOINs
+
+These join algorithms require the data to be sorted first, with '**_full_sorting_merge_**' requiring **both tables** to be **sorted before joining** (classical sort-merge) while '**_partial_merge_**' requires the **right-hand table** to be sorted before joining. To achieve the best performance for these algorithms; tables should be sorted (`ORDER BY`) on the attributes used in their join statement.
+
+Note that sorting takes place in memory if possible (otherwise spills to disk). Also, '_full_sorting_merge_' can have similar performances to '_hash_' but uses much less memory.
+
+### Direct Joins
+
+A **_Dictionary_** is a special type of **key-value "table"** (typically) stored in memory, tied to a **_source_** (rows/mappings come from another place like local file, executable file, http(s), etc.), periodically updated.
+![alt text](image-44.png)
+once the dictionary is set, querying it is done using `dictGet(<dictionary_name>, <attribute_name>, <value_of_key>)`, thereby performing similar to a join function.
+
+If the updating mechanism is not required, **_Join_** _table engine_ (right-hand table is sorted in memory) can be used. A table is specified with `Engine = Join(join_strictness, join_type, keys)`, where **_join_strictness_** and **_join_type_** allow ClickHouse to take advantage of the user's knowledge about how the table will be joined to optimise execution time and memory usage.
+
+An **_EmbeddedRocksDB_** _table engine_ (right-hand table is a **_rocksdb_** table) https://clickhouse.com/docs/en/engines/table-engines/integrations/embedded-rocksdb https://rocksdb.org/. By being a RocksDB table, A special _direct_ join with EmbeddedRocksDB tables is supported; which avoids forming a hash table in memory and accesses the data directly from the database.
+
+![alt text](image-45.png)
