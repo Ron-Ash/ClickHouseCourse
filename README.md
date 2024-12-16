@@ -50,7 +50,7 @@ Primary key determines how the data is stored and searched, if no `PRIMARY KEY` 
 ![alt text](image-6.png)
 Once ClickHouse knows the _granule(s)_ (called a **_stripe of granules_**) that need to be serached, each _stripe of granules_ is sent to a thread for processing (_stripes_ are processed concurrently, with faster threads stealing tasks from slower threads).
 
-ClickHouse then merges these created folders (partly why its called a _MergeTree_) over time; deleting the unused, redundant _parts_ in favour of the coalesced _merged part_. This process it then continued on the _merged part_ folders, creating a cascading tree of merges (Note that this will not end in a single folder as there is a size limit enforced).
+ClickHouse then merges these created folders (partly why its called a _MergeTree_) over time; deleting the unused, redundant _parts_ in favour of the coalesced _merged part_ (can initilize an unscheduled _merge_ using `OPTIMIZE TABLE my_table FINAL;` though it is not recommended). This process it then continued on the _merged part_ folders, creating a cascading tree of merges (Note that this will not end in a single folder as there is a size limit enforced).
 ![alt text](image-2.png)
 ![alt text](image-3.png)
 ![alt text](image-4.png)
@@ -149,7 +149,7 @@ sometimes ClickHouse can infer the column names and data types (schema might not
 
 ClickHouse supports over 75 data formats (TSV, CSV, ..., 20+ formats for JSON data, ..., Protobuf, Parquet, Arrow, ...)
 
-**_Table Engine_** has to be used for Provider-Subscriber platforms like Kafka (uses ClickPipes if using ClickHouse Cloud)
+**_Table Engine_** has to be used for Provider-Subscriber platforms like Kafka (uses ClickPipes if using _ClickHouse Cloud_)
 ![alt text](image-25.png)
 
 ### Table Functions vs Table Engines
@@ -736,3 +736,29 @@ If the updating mechanism is not required, **_Join_** _table engine_ (right-hand
 An **_EmbeddedRocksDB_** _table engine_ (right-hand table is a **_rocksdb_** table) https://clickhouse.com/docs/en/engines/table-engines/integrations/embedded-rocksdb https://rocksdb.org/. By being a RocksDB table, A special _direct_ join with EmbeddedRocksDB tables is supported; which avoids forming a hash table in memory and accesses the data directly from the database.
 
 ![alt text](image-45.png)
+
+## Deleting and Updating Data
+
+_Parts_ in ClickHouse are **immutable** files and so updates/deletions can only occur when _parts_ merge (heavy-weight operation). These require the `ALTER TABLE` command (`ALTER TABLE random UPDATE y = 'hello' WHERE x > 10;`, etc. note however that updates cannot occur on a primary key column), called a **_mutation_**, which does not execute immediately (like an event) but is kept (inside `system.mutations`) until the next merge where it is realized (can have the client wait until the mutation is realized by setting `mutation_sync = 1 || 2`).
+
+_Mutations_ execute in the order they were created, and each _part_ is processed in that order (data inserted after _mutation_ is not _mutated_); and if a mutation gets stuck, it can be stopped using `KILL MUTATION`. _Mutations_ in replicated tables are handled by _ZooKeeper_.
+
+### Lightweight Mutations
+
+Only available in _ClickHouse Cloud_, **_Lightweight Mutations_** leverage hidden columns to dynamically apply the certain _mutations_ so their effects take place immediately (no need to wait for next merge).
+
+**_Lightweight Delete_** uses `DELTE FROM my_table WHERE y != 'hello';`,a different syntax to that of a mutation (more a lightweight operation than a _mutation_). This marks the deleted rows using a special hidden column with queries automatically rewritten to exclude them (eventually deleted during the next merge).
+
+**_Lightweight Update_** use the same syntax as mutation updates but require setting `SET apply_mutation_on_fly = 1;`, causing the rows to appear to have updated immediately (haven't but will in the next merge). Frequent lightweight updates can have a negative impact on performance.
+
+### Deduplication
+
+When data is updated frequently, it is not performally feasible to use (_lightweight_) _mutations_ and instead; a combination of **upserting/re-inserting** data with special _table engines_ (designed for deleting duplciated records) can be used: (work on both _ClickHouse Cloud_ and open source)
+
+![alt text](image-46.png)
+
+While these will have the correct internal logic; similar to the aforementioned options, the data does not trully update until the next merge is initiated (queries will return unexpected results). To fix this, `FINAL` is used at the end of queries to indicate to ClickHouse that the proper representation of the data is desired.
+
+- **_CollapsingMergeTree(T)_** tables must have a `sign Int8` attribute on which it collapses. `sign = 1` means that the row is a state of an object; whereas `sign = -1` means the cancellation of the state of an object with the same attributes. These then act similar but not entirely equal to replace and delete operations. Note that this _engine_ allows only strictly consecutive insertions.
+- **_VersionedCollapsingMergeTree(T,U)_** works similar to _CollapsingMergeTree_ but allows for out of order insertions (using multiple threads) by having an additional `version` attribute (commonly `TimeStamp`).
+- **_ReplacingMergeTree_** similar to _VersionedCollapsingMergeTree_ can have an optional `version` attribute to prevent racing conditions.
