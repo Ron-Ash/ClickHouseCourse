@@ -757,7 +757,7 @@ When data is updated frequently, it is not performally feasible to use (_lightwe
 
 ![alt text](image-46.png)
 
-While these will have the correct internal logic; similar to the aforementioned options, the data does not trully update until the next merge is initiated (queries will return unexpected results). To fix this, `FINAL` is used at the end of queries to indicate to ClickHouse that the proper representation of the data is desired.
+While these will have the correct internal logic; similar to the aforementioned options, the data does not trully update until the next merge is initiated (queries will return unexpected results). To fix this, `FROM my_table FINAL` is used to indicate to ClickHouse that the proper representation of the data is desired.
 
 - **_CollapsingMergeTree(T)_** tables must have a `sign Int8` attribute on which it collapses. `sign = 1` means that the row is a state of an object; whereas `sign = -1` means the cancellation of the state of an object with the same attributes. These then act similar but not entirely equal to replace and delete operations. Note that this _engine_ allows only strictly consecutive insertions.
 - **_VersionedCollapsingMergeTree(T,U)_** works similar to _CollapsingMergeTree_ but allows for out of order insertions (using multiple threads) by having an additional `version` attribute (commonly `TimeStamp`).
