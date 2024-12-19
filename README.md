@@ -729,6 +729,22 @@ Note that sorting takes place in memory if possible (otherwise spills to disk). 
 
 A **_Dictionary_** is a special type of **key-value "table"** (typically) stored in memory, tied to a **_source_** (rows/mappings come from another place like local file, executable file, http(s), etc.), periodically updated.
 ![alt text](image-44.png)
+
+```sql
+CREATE DICTIONARY uk_mortgage_rates
+(
+    `date` DateTime64,
+    `variable` Decimal32(2),
+    `fixed` Decimal32(2),
+    `bank` Decimal32(2)
+)
+PRIMARY KEY date
+SOURCE(HTTP(URL 'https://learnclickhouse.s3.us-east-2.amazonaws.com/datasets/mortgage_rates.csv' FORMAT 'CSVWithNames'))
+LIFETIME(MIN 0 MAX 2628000000)
+LAYOUT(COMPLEX_KEY_HASHED())
+SETTINGS(date_time_input_format = 'best_effort')
+```
+
 once the dictionary is set, querying it is done using `dictGet(<dictionary_name>, <attribute_name>, <value_of_key>)`, thereby performing similar to a join function.
 
 If the updating mechanism is not required, **_Join_** _table engine_ (right-hand table is sorted in memory) can be used. A table is specified with `Engine = Join(join_strictness, join_type, keys)`, where **_join_strictness_** and **_join_type_** allow ClickHouse to take advantage of the user's knowledge about how the table will be joined to optimise execution time and memory usage.
