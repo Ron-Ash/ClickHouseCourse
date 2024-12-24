@@ -875,7 +875,7 @@ ALTER TABLE uk_price_paid
 MATERIALIZE INDEX uk_price_paid_index_1; -- apply given index (mutation) on past data
 ```
 
-queries can be forced to use teh skipping index through `SETTINGS use_skip_index=1`
+queries can be forced to use the skipping index through `SETTINGS use_skip_index=1`
 
 </td></tr></table>
 
@@ -897,7 +897,7 @@ A **_Bloom filter_** is a space-efficient probabilistic data structure for testi
 
 - `ngrambf_v1` functions the same as the `tokenbf_v1`, but takes one additional parameter before the Bloom filter settings; the size of the **_ngrams_** (character string of length `n`) to index instead of `tokenbf_v1`'s character sequences separated by non-alphanumeric characters (string `A_short_string` with an _ngram_ size of 4 would be indexed as `A_sh` `_sho` `shor` `hort` `ort_` `rt_s` `t_st` `_str` `stri` `trin` `ring`).
 
-## ClickHouse Anti-patterns
+## _ClickHouse_ Anti-patterns
 
 1. **Too many parts**: Each _part_ represents a folder of files on the filesystem (max value is set by `max_parts_in_total`, default is 100000). The most common causes of "too many _parts_" error:
 
@@ -911,4 +911,19 @@ A **_Bloom filter_** is a space-efficient probabilistic data structure for testi
 5. **Choosing a poor primary key**: Select columns for which you will often filter on (typically no more than 2-3), and order the columns in a primary key by their cardinality in ascending order.
 6. **Overuse of data skipping indices**: Common to have skipping indexes that simply complicate table design, slow insert performance, and rarely improve query performance. Skip indices **should only be considered once other alternatives have been exhausted**.
 7. **Thinking `LIMIT` will speed up a query**: It might speed up the query but typically it does not (aggregates usually need to read all rows anyway). If `GROUP BY` the primary key, then try setting `optimize_aggregation_in_order=1` with a `LIMIT`; then it will shortcut the query.
-8. **Issues relating to Materialized Views**: ensure it is understood how they work; only trigger on `INSERT`, have no visibility of merges, partition drop, or mutations, `ORDER BY` clauses of the target table must be consistent with the `GROUP BY` of the `SELECT` clause, the column names of the _materialized view's_ `SELECT` must match those of the destination table. **too many _materialized views_** to a single table. Many of `-State` functions (especially `quantile` states) can be CPU intensive and lead to slow inserts.
+8. **Issues relating to _Materialized Views_**: ensure it is understood how they work; only trigger on `INSERT`, have no visibility of merges, partition drop, or mutations, `ORDER BY` clauses of the target table must be consistent with the `GROUP BY` of the `SELECT` clause, the column names of the _materialized view's_ `SELECT` must match those of the destination table. **too many _materialized views_** to a single table. Many of `-State` functions (especially `quantile` states) can be CPU intensive and lead to slow inserts.
+
+## _ClickHouse_ Best Practices
+
+1. **Use _dictionaries_ with `JOIN`s**: No matter with `JOIN` technique is used, an attempt is made to load the right-hand table into memory. _Dictionaries_ are already in memory (if possible), and so whenever possible use a _dictionary_ for the right hand side of all `JOIN`s.
+   ![alt text](image-50.png)
+2. **Avoid `Float*` when possible**: If possible, use integer types (more accurate, much faster to process, etc.) by storing 2 columns (Dollars, cents).If must store floating-point values, use `Decimal` data types (maintains accuracy).
+3. **Understand how _projections_ work**: Make sure the benefits of a _projection_ is worth the tradeoff (extra storage and computation vs. the gain in query performance).
+4. **`UUID` and `IP` addresses**: Do not store these as `String` data types, use the dedicated `UUID` and `IP` data types instead (more efficient and faster).
+5. **Prefer `LowCardinality` data types to `Enum`**: `Enum`s are great, but to change them requires altering the table (DDL change) whereas `LowCardinality` has a similar performance benefit but can easily add new values to the column.
+6. **Flatten data**: Even better than joining data at query time, join teh data at insertion time.
+7. **Use _materialized views_**: Instead of computing values with each query, define a materialized view (computed at insertion). Define multiple _MVs_ fro a single table (or create views of views).
+8. **Don't overuse regular views**: sinple stored queries and cannot take advantage of some of the query optimizations that _ClickHouse_ performs on queries.
+9. **View the query details**: Use the `EXPLAIN` statement to view the execution plan of a query.
+10. **The read-only table error**: "Table is readonly mode" almost always means the ClickHouse Keeper (or ZooKeeper) is not running properly (or unreachable)
+11. **_ClickHouse_ not starting up properly**: Check `/metadata` folder containing a collection of `.sql` files that are executed at startup. Delete a file if it is causing an issue (if comfortable with losing that metadata). Useful if want to delete a table without having to startup the server.
