@@ -61,7 +61,7 @@ As in most DBMSs, ClickHouse logically groups tables into **_databases_** (`CREA
 ![alt text](image-7.png)
 Note that databases also have _engines_; with the default _database engine_ being **_Atomic_**, unless using **_ClickHouse Cloud_** in which case the default _database engine_ is **_Replicated_**.
 
-Table creation also follows traditional DBMSs with teh exception of the _engine_:
+Table creation also follows traditional DBMSs with the exception of the _engine_:
 ![alt text](image-9.png)
 
 Aside from all the expected SQL-like data types that ClickHouse provides, it additionally provides some more unique and interesting types like:
@@ -155,7 +155,7 @@ ClickHouse supports over 75 data formats (TSV, CSV, ..., 20+ formats for JSON da
 ### Table Functions vs Table Engines
 
 ![alt text](image-26.png)
-table engines in general store all the connection details, teh type of file, the schema, the credentials, etc. These are not required to be entered everytime they are accessed (like a proxy) instead the files stay on the 3rd party server but can be queried as if on the ClickHouse server (when queried streams data to ClickHouse server).
+table engines in general store all the connection details, the type of file, the schema, the credentials, etc. These are not required to be entered everytime they are accessed (like a proxy) instead the files stay on the 3rd party server but can be queried as if on the ClickHouse server (when queried streams data to ClickHouse server).
 | | |
 |-|-|
 |![alt text](image-27.png)|![alt text](image-28.png)|
@@ -165,7 +165,7 @@ PostgreSQL and MySQL have special **_database engines_** as well:
 
 ## Views
 
-The concept of views in ClickHouse is similar to views in other DBMSs; with the contents of a view table being based on teh results of a `SELECT` query.
+The concept of views in ClickHouse is similar to views in other DBMSs; with the contents of a view table being based on the results of a `SELECT` query.
 ![alt text](image-30.png)
 
 ### Parameterized Views
@@ -690,7 +690,7 @@ _ClickHouse Cloud_ uses a cloud-native replacement to _ReplicatedMergeTree_ , ca
 
 https://clickhouse.com/docs/en/guides/joining-tables
 
-Clickhouse supports all SQL JOINs, teh difference comes from how ClickHouse handles the right vs left tables in the join. Joining large datasets require a lot of memory and CPU power; and so to ensure maximum utilization of resources, ClickHouse has 6 different join algorithms:
+Clickhouse supports all SQL JOINs, the difference comes from how ClickHouse handles the right vs left tables in the join. Joining large datasets require a lot of memory and CPU power; and so to ensure maximum utilization of resources, ClickHouse has 6 different join algorithms:
 
 ![alt text](image-41.png)
 
@@ -823,3 +823,92 @@ TTL timestamp TO VOLUME 'hot', -- has to depend on a column of the table.
 Note that volumes and disks must be defined in the storage policies of the ClickHouse server (inside `config.d`) https://clickhouse.com/docs/en/engines/table-engines/mergetree-family/mergetree#table_engine-mergetree-multiple-volumes_configure.
 
 _TTL_ rules can be appended into existing table/column using `ALTER TABLE my_table MODIFY COLUMN name type TTL ...`; and to apply all _TTL_ rules to existing rows can be done using `ALTER TABLE my_table MATERIALIZE TTL`. Note that _TTL_ actions will occur in next _merge_ (to happen immediately must use `OPTIMIZE TABLE my_table FINAL`).
+
+## Projection
+
+https://clickhouse.com/docs/en/sql-reference/statements/alter/projection
+
+**_Projections_** are additional (hidden) per _part/partition_ table(s), automatically kept in sync with the original table (similar to a _materialized view_ for a _part_ or _partition_), with _ClickHouse_ deciding at **query time** whether to use or not to reduce the number of rows scanned. This is beneficial when running queries on non-primary-key columns or running total aggregates.
+
+```sql
+ALTER TABLE uk_price_paid
+   ADD PROJECTION uk_price_paid_projection_1 (
+      SELECT town, price, date, street, locality -- can pick all columns or just the neccessary for a commonly used query
+      ORDER BY town -- sort the data in the projection by town
+   );
+-- note that this adds a mutation to the table
+
+ALTER TABLE uk_price_paid
+MATERIALIZE PROJECTION uk_price_paid_projection_1; -- apply given projection (mutation) on past data
+```
+
+```sql
+ALTER TABLE uk_price_paid
+   ADD PROJECTION uk_price_paid_projection_2 (
+      SELECT town, max(price) -- aggregate is stored for each part
+      GROUP BY town -- aggregated by town
+   );
+```
+
+When a _projection_ is made, an **anynomous** \*_MergeTree_ table is created and stored in a **subfolder** of the _part_ folder. This adds overheads for storage, inserts, merges, etc. (similar to materialized view overhead) but substaintially increase retrieval speeds.
+
+## Skipping Index
+
+https://clickhouse.com/docs/en/optimize/skipping-indexes#skip-index-types
+
+**_Skipping Index_** is an additional index that a _MergeTree_ table can define; which do not store the data twice (unlike _materialized views_ or _projections_) or sort the data differently. Instead, they are built off the existing sort order and the existing _granules_ (based on the data in **blocks** = _>=1 granule_ ), where _ClickHouse_ can use this additional index to identify whether the _block_ has requested data or not, hence skipping large chunks of data:
+
+<table><tr><td>
+
+![alt text](image-48.png)
+
+</td><td>
+
+```sql
+ALTER TABLE uk_price_paid
+   ADD INDEX uk_price_paid_index_1 town -- attribute to apply the index on
+   TYPE minmax -- index type
+   GRANULARITY 1; -- the block size (n x granule_size)
+-- note that this adds a mutation to the table
+
+ALTER TABLE uk_price_paid
+MATERIALIZE INDEX uk_price_paid_index_1; -- apply given index (mutation) on past data
+```
+
+queries can be forced to use teh skipping index through `SETTINGS use_skip_index=1`
+
+</td></tr></table>
+
+### Skip Index Types
+
+- `minmax` stores the minimum and maximum values of the index expression for each _block_
+- `set` accepts a single parameter of the maximum size of the value set per _block_ (0 permits an unlimited number of discrete values), and stores a set containing all unique values in the _block_.
+
+A **_Bloom filter_** is a space-efficient probabilistic data structure for testing set membership (is 'a' in ('1','b','c')) at the cost of a slight chance of false positives (False or Probably True). Because _Bloom filters_ can more efficiently handle testing for a large number of discrete values, they can be appropriate for conditional expressions that produce more values to test. In particular, a _Bloom filter_ index can be applied to arrays, where every value of the array is tested, and to maps, by converting either the keys or values to an array using the mapKeys or mapValues function. There are three _Data Skipping Index_ types based on _Bloom filter_:
+
+- `bloom_filter` takes a single optional parameter of the allowed "false positive" rate between 0 and 1 (if unspecified, .025 is used).
+- `tokenbf_v1` takes three parameters, all related to tuning the bloom filter used:
+
+  1.  the size of the filter in bytes (larger filters have fewer false positives, at some cost in storage).
+  2.  number of hash functions applied (again, more hash filters reduce false positives).
+  3.  the seed for the bloom filter hash functions.
+
+  calculator https://hur.st/bloomfilter/ can be used from more details. This index works only with String, FixedString, and Map datatypes. The input expression is split into character sequences separated by non-alphanumeric characters (a column value of `This is a candidate for a "full text" search` will contain the tokens `This` `is` `a` `candidate` `for` `full` `text` `search`). It is intended for use in `LIKE`, `EQUALS`, `IN`, `hasToken()` and similar searches for words and other values within longer strings.
+
+- `ngrambf_v1` functions the same as the `tokenbf_v1`, but takes one additional parameter before the Bloom filter settings; the size of the **_ngrams_** (character string of length `n`) to index instead of `tokenbf_v1`'s character sequences separated by non-alphanumeric characters (string `A_short_string` with an _ngram_ size of 4 would be indexed as `A_sh` `_sho` `shor` `hort` `ort_` `rt_s` `t_st` `_str` `stri` `trin` `ring`).
+
+## ClickHouse Anti-patterns
+
+1. **Too many parts**: Each _part_ represents a folder of files on the filesystem (max value is set by `max_parts_in_total`, default is 100000). The most common causes of "too many _parts_" error:
+
+   1. **too many _partitions_** (poor user design) - only _partition_ by month (or day if have a lot of data)
+   2. **too many small inserts** - enable async inserts (`SETTINGS async_insert=1`)
+   3. **too many _materialized views_** - try consolidating aggregates into a smaller number of views
+
+2. **Scaling horizontally too early**: _ClickHouse_ will try to use all of a machine's resources; often deployed on servers with hundreds of cores, terabytes of RAM, and petabytes of disk space. 2 machines are for redundancy but **go vertical before going horizontal**.
+3. **Using frequent _mutations_** (`ALTER TABLE` queries, etc.): _Mutations_ can cause a backlog of _merges_ which lead to too many _parts_, replication delays, frequent CPU and IO-intensive _merges_. **Use deduplication strategies instead**.
+4. **Unneccessary use of complex types**: It is recommended to use primitive types where possible (offer the best insertion and query time performance) and use the more complex data types only when neccessary (`Nested`, `Tuple`, `Map`, `JSON`, etc.). **Avoid using Nullable** (only use when needed in the buisness logic).
+5. **Choosing a poor primary key**: Select columns for which you will often filter on (typically no more than 2-3), and order the columns in a primary key by their cardinality in ascending order.
+6. **Overuse of data skipping indices**: Common to have skipping indexes that simply complicate table design, slow insert performance, and rarely improve query performance. Skip indices **should only be considered once other alternatives have been exhausted**.
+7. **Thinking `LIMIT` will speed up a query**: It might speed up the query but typically it does not (aggregates usually need to read all rows anyway). If `GROUP BY` the primary key, then try setting `optimize_aggregation_in_order=1` with a `LIMIT`; then it will shortcut the query.
+8. **Issues relating to Materialized Views**: ensure it is understood how they work; only trigger on `INSERT`, have no visibility of merges, partition drop, or mutations, `ORDER BY` clauses of the target table must be consistent with the `GROUP BY` of the `SELECT` clause, the column names of the _materialized view's_ `SELECT` must match those of the destination table. **too many _materialized views_** to a single table. Many of `-State` functions (especially `quantile` states) can be CPU intensive and lead to slow inserts.
