@@ -778,3 +778,48 @@ While these will have the correct internal logic; similar to the aforementioned 
 - **_CollapsingMergeTree(T)_** tables must have a `sign Int8` attribute on which it collapses. `sign = 1` means that the row is a state of an object; whereas `sign = -1` means the cancellation of the state of an object with the same attributes. These then act similar but not entirely equal to replace and delete operations. Note that this _engine_ allows only strictly consecutive insertions.
 - **_VersionedCollapsingMergeTree(T,U)_** works similar to _CollapsingMergeTree_ but allows for out of order insertions (using multiple threads) by having an additional `version` attribute (commonly `TimeStamp`).
 - **_ReplacingMergeTree_** similar to _VersionedCollapsingMergeTree_ can have an optional `version` attribute to prevent racing conditions.
+
+## Data Compression
+
+ClickHouse compresses _MergeTree_ data automaically before writing it to storage (default is **_LZ4_**). Compression can be set globally (via `config.xml` files) or at the **column-level** via `CODEC(compression1[, compression2, ...])` (compression **_pipeline_** where `data -> compression1 -> compression2 -> ... -> compressed-column`) suffix to the column definitions: https://clickhouse.com/docs/en/sql-reference/statements/create/table#column_compression_codec
+
+![alt text](image-47.png)
+
+There are further specialized **codecs** which instead of compress the data; encrypt on disk it instead. These are only available when an encryption key is specified by encryption settings (within `config.xml` file). **Encryption should only be at the end of codec pipelines**, as encrypted data usually cannot be compressed in any meaningful way (evenly distributed/far-apart, high-valued, etc.).
+
+`AES-128-GCM-SIV`, or `AES-256-GCM-SIV` will encrypt the data with AES-(128/256) in (RFC 8452, https://datatracker.ietf.org/doc/html/rfc8452, for 128 version) GCM-SIV mode.
+
+These codecs use a fixed nonce and encryption is therefore deterministic. This makes it compatible with **_deduplicating engines_** such as _ReplicatedMergeTree_. However, when the same data block is encrypted twice, the resulting ciphertext will be exactly the same so an adversary who can read the disk can see this equivalence (although only the equivalence, without getting its content).
+
+Notes to keep in mind:
+
+- Most engines including the "\*_MergeTree_" family create index files on disk without applying codecs. This means plaintext will appear on disk if an encrypted column is indexed.
+- performing a `SELECT` query mentioning a specific value in an encrypted column (such as in its WHERE clause), the value may appear in system.query_log (disable the logging to prevent unintended disclosure).
+
+## Time To Live
+
+A **lifetime**, **_TTL_**, can be configured for a _MergeTree_ tables and/or columns by using the `TTL inverval [TO [VOLUME|DISK] name] [, inverval ..., ...]` clause to define a **time interval**. By default, a _TTL_ on a table causes the affected rows to be deleted; however, it can be configured so _parts_ will be **moved, compressed**, or **aggregated** based on a _TTL_ criteria (if all rows in _part_ satisfy the _TTL_).
+
+This can be used to create a **hot/cold architecture** within ClickHouse; where data is continuously moved into higher-compression, slower retrieval disks/volumes as it gets older:
+
+```sql
+CREATE TABLE my_table(
+   id Int,
+   x Decimal64(2),
+   y Decimal32(2),
+   sum_x Decimal256(2),
+   max_y Decimal132(2),
+   timestamp DateTime -- set to now() on inserts
+)ENGINE = MergeTree
+ORDER BY id
+TTL timestamp TO VOLUME 'hot', -- has to depend on a column of the table.
+   timestamp + INTERVAL 1 HOUR TO VOLUME 'warm',
+   timestamp + INTERVAL 1 DAY TO VOLUME 'cold', -- move data to colder volumes as they become older
+   timestamp + INTERVAL 1 WEEK TO VOLUME 'frozen',
+   timestamp + INTERVAL 1 WEEK GROUP BY id SET sum_x = sum(x), max_y = max(y), -- Rollup: contain GROUP BY ... SET that uses aggregate functions on columns
+   timestamp + INTERVAL 1 MONTH -- will delete part where all rows are older than a month
+```
+
+Note that volumes and disks must be defined in the storage policies of the ClickHouse server (inside `config.d`) https://clickhouse.com/docs/en/engines/table-engines/mergetree-family/mergetree#table_engine-mergetree-multiple-volumes_configure.
+
+_TTL_ rules can be appended into existing table/column using `ALTER TABLE my_table MODIFY COLUMN name type TTL ...`; and to apply all _TTL_ rules to existing rows can be done using `ALTER TABLE my_table MATERIALIZE TTL`. Note that _TTL_ actions will occur in next _merge_ (to happen immediately must use `OPTIMIZE TABLE my_table FINAL`).
