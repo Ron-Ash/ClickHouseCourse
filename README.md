@@ -875,7 +875,7 @@ ALTER TABLE uk_price_paid
 MATERIALIZE INDEX uk_price_paid_index_1; -- apply given index (mutation) on past data
 ```
 
-queries can be forced to use the skipping index through `SETTINGS use_skip_index=1`
+queries can be forced to use the skipping index through `SETTINGS use_skip_indexes=1`
 
 </td></tr></table>
 
