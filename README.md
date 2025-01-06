@@ -114,34 +114,6 @@ Partitions can improved the performance of mutations, moving data around, retent
 
 In most cases, partition key is not required; and in most other cases, a partition key more granular than by month is not required.
 
-```sql
--- creates a view that will calculate the data used when (un)compressed by the tables defined:
-CREATE VIEW memory_usage_per_tables AS (
-  SELECT
-    table,
-    formatReadableSize(sum(data_compressed_bytes)) AS compressed_size,
-    formatReadableSize(sum(data_uncompressed_bytes)) AS uncompressed_size,
-    count() AS num_of_active_parts
-  FROM system.parts
-  WHERE (active = 1) AND (table IN {table_names:Array(String)})
-  GROUP BY table
-);
-```
-
-```sql
-SELECT *
-FROM memory_usage_per_tables(table_names = ['uk_prices', 'generation'])
-
-Query id: 678c9ce2-25b1-4467-911a-68a53a681055
-
-   ┌─table──────┬─compressed_size─┬─uncompressed_size─┬─num_of_active_parts─┐
-1. │ uk_prices  │ 876.59 KiB      │ 19.56 MiB         │                   1 │
-2. │ generation │ 2.00 GiB        │ 10.79 GiB         │                   7 │
-   └────────────┴─────────────────┴───────────────────┴─────────────────────┘
-
-2 rows in set. Elapsed: 0.004 sec.
-```
-
 ## Inserting Data
 
 ![alt text](image-24.png)
@@ -927,3 +899,194 @@ A **_Bloom filter_** is a space-efficient probabilistic data structure for testi
 9. **View the query details**: Use the `EXPLAIN` statement to view the execution plan of a query.
 10. **The read-only table error**: "Table is readonly mode" almost always means the ClickHouse Keeper (or ZooKeeper) is not running properly (or unreachable)
 11. **_ClickHouse_ not starting up properly**: Check `/metadata` folder containing a collection of `.sql` files that are executed at startup. Delete a file if it is causing an issue (if comfortable with losing that metadata). Useful if want to delete a table without having to startup the server.
+
+## Advance Topics
+
+### Continuous (automatic) ingestion into _ClickHouse_ table from S3 folder
+
+Continuous ingestion into _ClickHouse_ from S3 (https://clickhouse.com/videos/loading-s3-data-into-clickhouse) can be achieved by having a _materialized view_ read (new) data coming in from an S3 bucket (new files) through an **_S3Queue_** (https://clickhouse.com/docs/en/engines/table-engines/integrations/s3queue) table; forming blocks of rows that it will then insert into the final table.
+
+The _S3Queue_ _table engine_ provides integration with Amazon S3 ecosystem (s3-specific features) and allows streaming import (similar to _Kafka_ _engine_). In order to keep track of processed files (is then able to distinguished between processed and new data inside S3), it requires one or more _ClickHouse Keeper_ (or _ZooKeeper_) nodes (cannot work otherwise); the simplest solution is to have a single combined _ClickHouse Keeper_ and _Database Host_ node: (see example below and **Sharding and Replication** section)
+
+<table>
+<tr>
+<td>
+
+_ClickHouse Keeper_ (or _ZooKeeper_) config files:
+
+```xml
+<clickhouse>
+   <keeper_server>
+      <tcp_port>9181</tcp_port>
+      <server_id>1</server_id>
+      <log_storage_path>/var/lib/clickhouse/
+coordination/log</log_storage_path>
+      <snapshot_storage_path>/var/lib/clickhouse/
+coordination/snapshots</snapshot_storage_path>
+
+      <coordination_settings>
+         <operation_timeout_ms>10000</operation_timeout_ms>
+         <session_timeout_ms>30000</session_timeout_ms>
+         <raft_logs_level>trace</raft_logs_level>
+      </coordination_settings>
+
+      <raft_configuration>
+         <server>
+               <id>1</id>
+               <hostname>chnode1</hostname>
+               <port>9234</port>
+         </server>
+      </raft_configuration>
+   </keeper_server>
+</clickhouse>
+```
+
+```xml
+<clickhouse>
+   <zookeeper>
+      <node index="1">
+         <host>chnode1</host>
+         <port>9181</port>
+      </node>
+   </zookeeper>
+</clickhouse>
+```
+
+```xml
+</clickhouse>
+   <macros>
+      <shard>1</shard>
+      <replica>replica_1</replica>
+   </macros>
+</clickhouse>
+```
+
+</td>
+<td>
+
+ClickHouse _Database Host_ config files:
+
+```xml
+<clickhouse>
+   <logger>
+         <level>debug</level>
+         <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+         <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+         <size>1000M</size>
+         <count>3</count>
+   </logger>
+   <display_name>clickhouse</display_name>
+   <listen_host>0.0.0.0</listen_host>
+   <http_port>8123</http_port>
+   <tcp_port>9000</tcp_port>
+   <interserver_http_port>9009</interserver_http_port>
+</clickhouse>
+```
+
+```xml
+</clickhouse>
+   <remote_servers replace="true">
+      <cluster_2S_1R>
+      <secret>mysecretphrase</secret>
+         <shard>
+               <internal_replication>true</internal_replication>
+               <replica>
+                  <host>chnode1</host>
+                  <port>9000</port>
+               </replica>
+         </shard>
+      </cluster_2S_1R>
+   </remote_servers>
+</clickhouse>
+```
+
+```xml
+<!-- can specify a "named collection" called "s3queue_conf" -->
+<clickhouse>
+   <named_collections>
+      <s3queue_conf>
+         <url>https://clickhouse-s3-bucket.s3.us-east-1.amazonaws.com/*.csv</url>
+         <access_key_id>ACCESS KEY<access_key_id>
+         <secret_access_key>KEY SECRET</secret_access_key>
+      </s3queue_conf>
+   </named_collections>
+</clickhouse>
+```
+
+</td>
+</tr>
+</table>
+
+<table><tr><td>
+
+After initiallising the _ClickHouse_ instance and its _Keeper_, the following procedure needs to be executed to create an **_s3queue_** (ingest all new files uploaded to s3 bucket), **_table_** (final destination of data), and a **_materialized view_** (consume data in _s3queue_ and insert it to _table_):
+
+```sql
+CREATE TABLE my_table_s3queue
+(
+   column1     FixedString(1),
+   column2     UInt32,
+   column3     String
+)
+ENGINE = S3Queue('https://clickhouse-s3-bucket.s3.us-east-1.amazonaws.com/*.csv', 'ACCESS KEY', 'KEY SECRET', 'CSVWithNames')
+-- or ENGINE = S3Queue(s3queue_conf, format = 'CSVWithNames')
+SETTINGS
+   mode = 'ordered'; -- assumes files' names in bucket are in chronological order, keeps track of "latest" name
+   -- or mode = 'unordered'; -- keeps track of all processed files
+```
+
+</td><td>
+
+```sql
+CREATE TABLE my_table
+(
+   column1     FixedString(1),
+   column2     UInt32,
+   column3     String
+)
+ENGINE = MergeTree
+ORDER BY (column1, column2)
+```
+
+```sql
+CREATE MATERIALIZED VIEW my_table_materialized_view TO my_table_s3queue AS
+SELECT *
+FROM my_table_s3queue;
+```
+
+</td>
+</tr>
+</table>
+
+The _materialized view_ reads the data coming in from the s3 bucket (through _s3queue_) and forms blocks of rows that it will then insert into the _table_. It **flushes** the rows into the _table_ based on the min insert block size configs (`SHOW SETTINGS LIKE 'min_insert_block_size%'`).:
+
+### Calculate storage utilization
+
+This code snippet show how to creates a view that will calculate the data used when (un)compressed by the tables defined:
+
+```sql
+CREATE VIEW memory_usage_per_tables AS (
+  SELECT
+    table,
+    formatReadableSize(sum(data_compressed_bytes)) AS compressed_size,
+    formatReadableSize(sum(data_uncompressed_bytes)) AS uncompressed_size,
+    count() AS num_of_active_parts
+  FROM system.parts
+  WHERE (active = 1) AND (table IN {table_names:Array(String)})
+  GROUP BY table
+);
+```
+
+```sql
+SELECT *
+FROM memory_usage_per_tables(table_names = ['uk_prices', 'generation'])
+
+Query id: 678c9ce2-25b1-4467-911a-68a53a681055
+
+   ┌─table──────┬─compressed_size─┬─uncompressed_size─┬─num_of_active_parts─┐
+1. │ uk_prices  │ 876.59 KiB      │ 19.56 MiB         │                   1 │
+2. │ generation │ 2.00 GiB        │ 10.79 GiB         │                   7 │
+   └────────────┴─────────────────┴───────────────────┴─────────────────────┘
+
+2 rows in set. Elapsed: 0.004 sec.
+```
