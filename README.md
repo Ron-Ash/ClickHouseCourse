@@ -1060,7 +1060,7 @@ The _materialized view_ reads the data coming in from the s3 bucket (through _s3
 
 ### Calculate storage utilization
 
-This code snippet show how to creates a view that will calculate the data used when (un)compressed by the tables defined:
+This code snippet show how to creates a view that will calculate the data used when (un)compressed by the tables defined (using regex):
 
 ```sql
 CREATE VIEW memory_usage_per_tables AS (
@@ -1070,21 +1070,22 @@ CREATE VIEW memory_usage_per_tables AS (
     formatReadableSize(sum(data_uncompressed_bytes)) AS uncompressed_size,
     count() AS num_of_active_parts
   FROM system.parts
-  WHERE (active = 1) AND (table IN {table_names:Array(String)})
+  WHERE (active = 1) AND (arrayExists(re -> match(table, re), {table_names:Array(String)}))
   GROUP BY table
 );
 ```
 
 ```sql
 SELECT *
-FROM memory_usage_per_tables(table_names = ['uk_prices', 'generation'])
+FROM memory_usage_per_tables(table_names = ['uk_prices_*'])
 
-Query id: 678c9ce2-25b1-4467-911a-68a53a681055
+Query id: d8763791-c10d-42bd-afd2-d2ffd4a39a92
 
-   ┌─table──────┬─compressed_size─┬─uncompressed_size─┬─num_of_active_parts─┐
-1. │ uk_prices  │ 876.59 KiB      │ 19.56 MiB         │                   1 │
-2. │ generation │ 2.00 GiB        │ 10.79 GiB         │                   7 │
-   └────────────┴─────────────────┴───────────────────┴─────────────────────┘
+   ┌─table────────────┬─compressed_size─┬─uncompressed_size─┬─num_of_active_parts─┐
+1. │ uk_prices_hf     │ 7.74 GiB        │ 14.41 GiB         │                  14 │
+2. │ uk_prices_daily  │ 2.34 MiB        │ 104.59 MiB        │                   5 │
+3. │ uk_prices_yearly │ 29.61 KiB       │ 61.00 KiB         │                   1 │
+   └──────────────────┴─────────────────┴───────────────────┴─────────────────────┘
 
-2 rows in set. Elapsed: 0.004 sec.
+3 rows in set. Elapsed: 0.020 sec.
 ```
