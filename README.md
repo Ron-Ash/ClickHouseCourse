@@ -1060,7 +1060,7 @@ The _materialized view_ reads the data coming in from the s3 bucket (through _s3
 
 ### Calculate storage utilization
 
-This code snippet show how to creates a view that will calculate the data used when (un)compressed by the tables defined (using regex):
+This code snippet show how to creates a view that will calculate the data used when (un)compressed by the tables defined (regex or explicit):
 
 ```sql
 CREATE VIEW memory_usage_per_tables AS (
